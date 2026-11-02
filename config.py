@@ -24,5 +24,10 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+# --- Slack (notification du draft + validation humaine via boutons Approve/Reject) ---
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#sdr-leads")
+
 # --- Persistance (SQLite pour l'instant ; migration Postgres si le volume grandit) ---
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "sdr_gtm.sqlite3"))

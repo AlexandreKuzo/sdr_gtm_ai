@@ -1,15 +1,14 @@
-"""API HTTP : point d'entrée webhook qui déclenche le workflow LangGraph.
-
-Phase 3 ajoutera /slack/interactions pour reprendre le graphe après validation humaine
-(actuellement, un lead qui atteint draft_email_node reste "pending" indéfiniment, faute
-de mécanisme de reprise).
-"""
+"""API HTTP : webhook d'entrée + callback Slack pour reprendre le graphe après
+validation humaine (bouton Approve/Reject sur la notification du draft)."""
+import json
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 import db
+import slack_client
 from agent import graph
 
 
@@ -80,3 +79,38 @@ def webhook_lead(payload: WebhookPayload) -> dict:
         "icp_score": result.get("icp_score"),
         "email_draft": result.get("email_draft"),
     }
+
+
+@app.post("/slack/interactions")
+async def slack_interactions(request: Request) -> dict:
+    raw_body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    if not slack_client.verify_signature(raw_body, timestamp, signature):
+        raise HTTPException(status_code=401, detail="signature Slack invalide")
+
+    form = parse_qs(raw_body.decode())
+    if "payload" not in form:
+        raise HTTPException(status_code=400, detail="payload Slack manquant")
+    payload = json.loads(form["payload"][0])
+
+    action = payload["actions"][0]
+    thread_id = action["value"]
+    approved = action["action_id"] == "approve_lead"
+
+    lead = db.get_lead(thread_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="lead inconnu")
+    if lead["status"] != "pending":
+        # Déjà traité (double-clic, retry Slack) : on ne rejoue pas le graphe.
+        return {"status": "ignored", "reason": f"lead déjà '{lead['status']}'"}
+
+    run_config = {"configurable": {"thread_id": thread_id}}
+    graph.update_state(run_config, {"human_approved": approved})
+    result = graph.invoke(None, config=run_config)
+
+    if "icp_score" in result:
+        db.update_score(thread_id, result["icp_score"])
+    db.update_status(thread_id, "synced" if approved else "rejected")
+
+    return {"status": "ok"}

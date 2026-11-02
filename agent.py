@@ -8,12 +8,14 @@ judge.py (heuristique, ou LLM si ANTHROPIC_API_KEY est défini).
 import sqlite3
 from typing import Any, Dict, Literal
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 import config
 import judge
+import slack_client
 
 
 # ==========================================
@@ -68,8 +70,8 @@ def score_lead_node(state: AgentState) -> Dict[str, Any]:
     return {"icp_score": score, "icp_reasoning": reasoning}
 
 
-def draft_email_node(state: AgentState) -> Dict[str, Any]:
-    """Rédige l'email personnalisé (via judge.py) si le score est bon."""
+def draft_email_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Rédige l'email personnalisé (via judge.py) et notifie Slack pour validation humaine."""
     print("✍️ [Nœud 4] Rédaction de l'email de prospection...")
     draft = judge.draft_email(
         decision_maker_email=state["enriched_data"]["decision_maker_email"],
@@ -77,9 +79,14 @@ def draft_email_node(state: AgentState) -> Dict[str, Any]:
         reasoning=state["icp_reasoning"],
     )
 
-    # Phase 3 remplacera ce print par un vrai message Slack (slack_client.notify_draft).
-    print("\n📢 [SLACK NOTIFICATION - SIMULATION] Nouveau draft généré ! En attente de validation...")
-    print(f"Draft : {draft}\n")
+    thread_id = config["configurable"]["thread_id"]
+    slack_client.notify_draft(
+        thread_id=thread_id,
+        draft=draft,
+        company_name=state["webhook_data"].get("company_name"),
+        icp_score=state["icp_score"],
+        icp_reasoning=state["icp_reasoning"],
+    )
 
     return {"email_draft": draft}
 
