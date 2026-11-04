@@ -98,12 +98,17 @@ async def slack_interactions(request: Request) -> dict:
     action = payload["actions"][0]
     thread_id = action["value"]
     approved = action["action_id"] == "approve_lead"
+    response_url = payload.get("response_url")
 
     lead = db.get_lead(thread_id)
     if lead is None:
         raise HTTPException(status_code=404, detail="lead inconnu")
     if lead["status"] != "pending":
         # Déjà traité (double-clic, retry Slack) : on ne rejoue pas le graphe.
+        if response_url:
+            slack_client.update_message(
+                response_url, f"⚠️ Déjà traité précédemment (statut actuel : *{lead['status']}*)."
+            )
         return {"status": "ignored", "reason": f"lead déjà '{lead['status']}'"}
 
     run_config = {"configurable": {"thread_id": thread_id}}
@@ -114,5 +119,9 @@ async def slack_interactions(request: Request) -> dict:
         db.update_score(thread_id, result["icp_score"])
     sf_lead_id = result.get("sf_status", {}).get("lead_id")
     db.update_status(thread_id, "synced" if approved else "rejected", sf_lead_id=sf_lead_id)
+
+    if response_url:
+        company_name = result.get("webhook_data", {}).get("company_name", thread_id)
+        slack_client.confirm_decision(response_url, approved, company_name, sf_lead_id)
 
     return {"status": "ok"}

@@ -7,6 +7,9 @@ simulation), pour ne pas bloquer le reste du workflow en dev.
 import hashlib
 import hmac
 import time
+from typing import Optional
+
+import requests
 
 import config
 
@@ -76,3 +79,22 @@ def notify_draft(thread_id: str, draft: str, company_name: str, icp_score: int, 
         _client.chat_postMessage(channel=config.SLACK_CHANNEL, text=text, blocks=blocks)
     except SlackApiError as exc:
         print(f"[SLACK:ERREUR] Échec de l'envoi de la notification : {exc}")
+
+
+def update_message(response_url: str, text: str) -> None:
+    """Remplace le message original (boutons compris) via le response_url du callback."""
+    try:
+        requests.post(response_url, json={"replace_original": True, "text": text}, timeout=5)
+    except requests.RequestException as exc:
+        print(f"[SLACK:ERREUR] Échec de la mise à jour du message : {exc}")
+
+
+def confirm_decision(response_url: str, approved: bool, company_name: str, sf_lead_id: Optional[str] = None) -> None:
+    """Affiche le résultat de la décision humaine à la place des boutons Approve/Reject."""
+    if approved:
+        text = f"✅ *Approuvé* — {company_name}"
+        if sf_lead_id:
+            text += f"\nLead créé dans Salesforce (`{sf_lead_id}`)."
+    else:
+        text = f"❌ *Rejeté* — {company_name}. Aucune action Salesforce."
+    update_message(response_url, text)
