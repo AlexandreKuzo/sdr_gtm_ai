@@ -71,7 +71,8 @@ def webhook_lead(payload: WebhookPayload) -> dict:
     # le lead reste "pending" jusqu'à la validation Slack (Phase 3).
     finished = len(graph.get_state(run_config).next) == 0
     if finished:
-        db.update_status(dedup_key, "synced")
+        sf_lead_id = result.get("sf_status", {}).get("lead_id")
+        db.update_status(dedup_key, "synced", sf_lead_id=sf_lead_id)
 
     return {
         "status": "synced" if finished else "awaiting_approval",
@@ -111,6 +112,7 @@ async def slack_interactions(request: Request) -> dict:
 
     if "icp_score" in result:
         db.update_score(thread_id, result["icp_score"])
-    db.update_status(thread_id, "synced" if approved else "rejected")
+    sf_lead_id = result.get("sf_status", {}).get("lead_id")
+    db.update_status(thread_id, "synced" if approved else "rejected", sf_lead_id=sf_lead_id)
 
     return {"status": "ok"}

@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent
 SF_AUTH_FLOW = os.getenv("SF_AUTH_FLOW", "client_credentials")
 SF_CLIENT_ID = os.getenv("SF_CLIENT_ID")
 SF_CLIENT_SECRET = os.getenv("SF_CLIENT_SECRET")
-SF_LOGIN_URL = os.getenv("SF_LOGIN_URL")
+SF_LOGIN_URL = (os.getenv("SF_LOGIN_URL") or "").rstrip("/") or None
 SF_USERNAME = os.getenv("SF_USERNAME")
 SF_PRIVATE_KEY_PATH = os.getenv("SF_PRIVATE_KEY_PATH")
 

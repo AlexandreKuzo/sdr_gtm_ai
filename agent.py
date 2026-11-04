@@ -1,9 +1,10 @@
 """Workflow LangGraph : webhook -> dédup Salesforce -> enrichissement -> scoring ->
 notification Slack (Human-in-the-loop) -> sync Salesforce.
 
-Les nœuds de dédup/enrichissement/sync Salesforce restent simulés pour l'instant
-(Phase 4 les branchera sur sf_client.py). Le scoring et la rédaction d'email utilisent
-judge.py (heuristique, ou LLM si ANTHROPIC_API_KEY est défini).
+L'enrichissement reste simulé pour l'instant (à brancher sur une vraie API, type
+Apollo/Exa). La dédup/sync Salesforce utilise sf_client.py si SF_CLIENT_ID/SECRET/
+LOGIN_URL sont configurés dans .env, sinon reste en mode simulation. Le scoring et la
+rédaction d'email utilisent judge.py (heuristique, ou LLM si une clé est définie).
 """
 import sqlite3
 from typing import Any, Dict, Literal
@@ -15,6 +16,7 @@ from typing_extensions import TypedDict
 
 import config
 import judge
+import sf_client
 import slack_client
 
 
@@ -41,9 +43,22 @@ class AgentState(TypedDict):
 # 2. LES NŒUDS (Les fonctions de traitement)
 # ==========================================
 def deduplicate_salesforce_node(state: AgentState) -> Dict[str, Any]:
-    """Vérifie si le lead existe déjà dans SF via email/domaine (Simulation — Phase 4)."""
+    """Vérifie si le lead existe déjà dans SF via le domaine de l'entreprise."""
+    domain = state["webhook_data"].get("company_domain")
     company = state["webhook_data"].get("company_name")
     print(f"🔍 [Nœud 1] Vérification des doublons Salesforce pour : {company}")
+
+    if not sf_client.is_configured():
+        print("⚠️ Salesforce non configuré (.env) — dédup simulée, lead considéré unique.")
+        return {"sf_status": {"is_duplicate": False, "lead_id": None}}
+
+    if not domain:
+        return {"sf_status": {"is_duplicate": False, "lead_id": None}}
+
+    existing = sf_client.find_lead_by_domain(domain)
+    if existing:
+        print(f"↪️ Doublon trouvé dans Salesforce : Lead {existing['Id']}")
+        return {"sf_status": {"is_duplicate": True, "lead_id": existing["Id"]}}
     return {"sf_status": {"is_duplicate": False, "lead_id": None}}
 
 
@@ -92,9 +107,29 @@ def draft_email_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any
 
 
 def sync_salesforce_node(state: AgentState) -> Dict[str, Any]:
-    """Crée le Lead et loggue l'activité dans Salesforce (Simulation — Phase 4)."""
-    print("☁️ [Nœud 5] Synchronisation finale dans Salesforce : Lead créé + Tâche logguée.")
-    return {}
+    """Crée le Lead (s'il est nouveau) et loggue l'activité dans Salesforce."""
+    if not sf_client.is_configured():
+        print("☁️ [Nœud 5] Salesforce non configuré (.env) — synchronisation simulée.")
+        return {}
+
+    lead_id = state["sf_status"].get("lead_id")
+    if lead_id is None:
+        lead_id = sf_client.create_lead(
+            company_name=state["webhook_data"].get("company_name"),
+            company_domain=state["webhook_data"].get("company_domain"),
+            decision_maker_email=state["enriched_data"].get("decision_maker_email"),
+            decision_maker_role=state["enriched_data"].get("decision_maker_role"),
+            icp_score=state.get("icp_score", 0),
+        )
+        print(f"☁️ [Nœud 5] Lead créé dans Salesforce : {lead_id}")
+    else:
+        print(f"☁️ [Nœud 5] Lead existant réutilisé : {lead_id}")
+
+    subject = "Email de prospection généré" if state.get("email_draft") else "Lead loggué (doublon ou score faible)"
+    description = state.get("email_draft") or state.get("icp_reasoning", "")
+    sf_client.log_activity(lead_id, subject, description)
+
+    return {"sf_status": {**state["sf_status"], "lead_id": lead_id}}
 
 
 def human_approval_gate_node(state: AgentState) -> Dict[str, Any]:

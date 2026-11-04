@@ -16,3 +16,4 @@ slack_sdk==3.45.0
 
 # Intégration Salesforce (Phase 4)
 simple-salesforce==1.12.10
+requests==2.34.2
