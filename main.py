@@ -22,11 +22,19 @@ app = FastAPI(title="SDR GTM Agent", lifespan=lifespan)
 
 
 class WebhookPayload(BaseModel):
+    """Contrat attendu depuis Clay (action "Send Webhook" sur la table d'enrichissement) :
+    les 3 derniers champs sont ceux que Clay doit avoir trouvés via sa cascade
+    Apollo/Clearbit/Hunter avant d'envoyer le webhook. Absents (contact non trouvé),
+    le lead est tout de même traité — voir route_after_scoring dans agent.py."""
+
     model_config = ConfigDict(extra="allow")
 
     company_name: str
     company_domain: str | None = None
-    # Autres champs du webhook source (Clay, etc.) acceptés sans validation stricte.
+    decision_maker_email: str | None = None
+    decision_maker_role: str | None = None
+    company_size: str | None = None
+    # Autres champs envoyés par Clay acceptés sans validation stricte (extra="allow").
 
 
 @app.get("/health")

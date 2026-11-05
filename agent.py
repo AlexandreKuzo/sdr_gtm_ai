@@ -63,15 +63,22 @@ def deduplicate_salesforce_node(state: AgentState) -> Dict[str, Any]:
 
 
 def enrich_lead_node(state: AgentState) -> Dict[str, Any]:
-    """Appelle une API (Apollo/Exa) pour trouver le décideur (Simulation)."""
-    print("🌐 [Nœud 2] Enrichissement des données du prospect...")
-    return {
-        "enriched_data": {
-            "decision_maker_email": "alex@acme.com",
-            "decision_maker_role": "VP of Sales",
-            "company_size": "150 employees",
-        }
+    """Lit les données d'enrichissement déjà fournies par Clay dans le payload du webhook.
+
+    Clay fait l'enrichissement en amont (cascade Apollo/Clearbit/Hunter/...) et doit
+    envoyer decision_maker_email, decision_maker_role et company_size via son action
+    "Send Webhook" — voir WebhookPayload dans main.py pour le contrat exact. Un champ
+    manquant (contact non trouvé par Clay) est accepté : le scoring heuristique dégrade
+    simplement la confiance plutôt que de planter.
+    """
+    webhook_data = state["webhook_data"]
+    enriched_data = {
+        "decision_maker_email": webhook_data.get("decision_maker_email"),
+        "decision_maker_role": webhook_data.get("decision_maker_role"),
+        "company_size": webhook_data.get("company_size"),
     }
+    print(f"🌐 [Nœud 2] Enrichissement reçu de Clay : {enriched_data}")
+    return {"enriched_data": enriched_data}
 
 
 def score_lead_node(state: AgentState) -> Dict[str, Any]:
@@ -146,9 +153,13 @@ def human_approval_gate_node(state: AgentState) -> Dict[str, Any]:
 # 3. LES ROUTEURS (Logique conditionnelle)
 # ==========================================
 def route_after_scoring(state: AgentState) -> Literal["draft_email_node", "sync_salesforce_node"]:
-    """Route le lead selon la note obtenue ou le statut de doublon."""
-    if state["sf_status"]["is_duplicate"] or state["icp_score"] < 50:
-        print("⚠️ Lead ignoré ou doublon. Envoi direct vers Salesforce pour log/mise à jour.")
+    """Route le lead selon la note obtenue, le statut de doublon, ou l'absence de contact."""
+    no_contact = not state["enriched_data"].get("decision_maker_email")
+    if state["sf_status"]["is_duplicate"] or state["icp_score"] < 50 or no_contact:
+        if no_contact:
+            print("⚠️ Aucun décideur trouvé par Clay. Envoi direct vers Salesforce pour log.")
+        else:
+            print("⚠️ Lead ignoré ou doublon. Envoi direct vers Salesforce pour log/mise à jour.")
         return "sync_salesforce_node"
     return "draft_email_node"
 
