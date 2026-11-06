@@ -17,3 +17,12 @@ slack_sdk==3.45.0
 # Intégration Salesforce (Phase 4)
 simple-salesforce==1.12.10
 requests==2.34.2
+
+# Brouillon Gmail (Phase 5)
+google-api-python-client==2.201.0
+google-auth==2.62.1
+google-auth-oauthlib==1.5.0
+
+# Tests
+pytest==9.2.0
+httpx==0.28.1
