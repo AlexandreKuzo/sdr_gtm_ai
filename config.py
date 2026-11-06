@@ -29,5 +29,10 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#sdr-leads")
 
+# --- Webhook d'entrée : secret partagé envoyé par Clay dans l'en-tête X-Webhook-Secret.
+# /webhook/lead est exposé publiquement (ngrok) : sans ce secret la route est fermée
+# (503) plutôt qu'ouverte, pour qu'un oubli de config ne laisse jamais la porte ouverte. ---
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
 # --- Persistance (SQLite pour l'instant ; migration Postgres si le volume grandit) ---
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "sdr_gtm.sqlite3"))

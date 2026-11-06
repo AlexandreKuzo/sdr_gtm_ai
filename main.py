@@ -1,12 +1,16 @@
 """API HTTP : webhook d'entrée + callback Slack pour reprendre le graphe après
 validation humaine (bouton Approve/Reject sur la notification du draft)."""
+import hmac
 import json
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from typing import Annotated
 
+from fastapi import FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel, BeforeValidator, ConfigDict
+
+import config
 import db
 import slack_client
 from agent import graph
@@ -21,6 +25,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SDR GTM Agent", lifespan=lifespan)
 
 
+def _as_text(value: object) -> object:
+    """Accepte un effectif envoyé comme nombre JSON (Clay le fait selon la source utilisée
+    dans sa cascade) sans faire échouer la validation : on le ramène en texte, et
+    judge.parse_company_size() s'occupe de l'interpréter."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return value
+
+
 class WebhookPayload(BaseModel):
     """Contrat attendu depuis Clay (action "Send Webhook" sur la table d'enrichissement) :
     les 3 derniers champs sont ceux que Clay doit avoir trouvés via sa cascade
@@ -33,7 +46,7 @@ class WebhookPayload(BaseModel):
     company_domain: str | None = None
     decision_maker_email: str | None = None
     decision_maker_role: str | None = None
-    company_size: str | None = None
+    company_size: Annotated[str | None, BeforeValidator(_as_text)] = None
     # Autres champs envoyés par Clay acceptés sans validation stricte (extra="allow").
 
 
@@ -42,13 +55,35 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+def _verify_webhook_secret(provided: str | None) -> None:
+    """Authentifie l'appelant de /webhook/lead via le secret partagé avec Clay.
+
+    Fail-closed : si WEBHOOK_SECRET n'est pas configuré côté serveur, la route répond 503
+    au lieu d'accepter tout le monde. La route est publiquement joignable (ngrok) et crée
+    de vrais enregistrements Salesforce : un oubli de config ne doit pas l'ouvrir.
+    """
+    expected = config.WEBHOOK_SECRET
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="WEBHOOK_SECRET non configuré côté serveur : webhook fermé.",
+        )
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="secret webhook invalide ou absent")
+
+
 def _dedup_key(payload: dict) -> str:
     key = payload.get("company_domain") or payload.get("company_name") or ""
     return key.strip().lower()
 
 
 @app.post("/webhook/lead")
-def webhook_lead(payload: WebhookPayload) -> dict:
+def webhook_lead(
+    payload: WebhookPayload,
+    x_webhook_secret: str | None = Header(default=None),
+) -> dict:
+    _verify_webhook_secret(x_webhook_secret)
+
     data = payload.model_dump()
     dedup_key = _dedup_key(data)
     if not dedup_key:
@@ -130,6 +165,12 @@ async def slack_interactions(request: Request) -> dict:
 
     if response_url:
         company_name = result.get("webhook_data", {}).get("company_name", thread_id)
-        slack_client.confirm_decision(response_url, approved, company_name, sf_lead_id)
+        slack_client.confirm_decision(
+            response_url,
+            approved,
+            company_name,
+            sf_lead_id,
+            gmail_draft=result.get("gmail_draft"),
+        )
 
     return {"status": "ok"}

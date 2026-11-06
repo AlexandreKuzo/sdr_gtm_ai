@@ -1,6 +1,6 @@
 """Client Salesforce : authentification (OAuth2 client_credentials) + dédup/sync des leads.
 
-Nécessite une External Client App configurée côté org (voir check-list fournie à part)
+Nécessite une External Client App configurée côté org (voir README.md)
 et les variables SF_CLIENT_ID, SF_CLIENT_SECRET, SF_LOGIN_URL dans .env. Tant que ce
 n'est pas fait, is_configured() renvoie False et agent.py reste en mode simulation.
 """
@@ -62,10 +62,28 @@ def get_client() -> Salesforce:
     return _cached_client
 
 
+def escape_soql_like(value: str) -> str:
+    """Échappe une valeur avant de l'injecter dans un littéral SOQL utilisé avec LIKE.
+
+    Le domaine vient du payload Clay, donc d'Internet (voir /webhook/lead) : il ne peut pas
+    être concaténé tel quel. L'ordre des remplacements compte — le backslash d'abord, sinon
+    on ré-échapperait les backslashes qu'on vient d'ajouter.
+
+    - `\\` et `'` : sans eux, une valeur comme `a\\'` referme le littéral et permet
+      d'injecter la suite de la requête.
+    - `%` et `_` : jokers LIKE. Non échappés, un domaine qui en contient élargit
+      silencieusement la recherche et fait matcher des Leads sans rapport — le lead serait
+      alors classé doublon et abandonné sans qu'on sache pourquoi.
+    """
+    for char in ("\\", "'", "%", "_"):
+        value = value.replace(char, "\\" + char)
+    return value
+
+
 def find_lead_by_domain(domain: str) -> Optional[dict]:
     """Cherche un Lead existant dont le site web correspond au domaine de l'entreprise."""
     sf = get_client()
-    safe_domain = domain.replace("'", "\\'")
+    safe_domain = escape_soql_like(domain)
     query = f"SELECT Id, Email, Company, Website FROM Lead WHERE Website LIKE '%{safe_domain}%' LIMIT 1"
     result = sf.query(query)
     if result["totalSize"] == 0:
@@ -82,10 +100,10 @@ def create_lead(
 ) -> str:
     """Crée un Lead dans Salesforce et retourne son Id.
 
-    LastName est obligatoire côté Salesforce mais l'enrichissement (simulé pour l'instant,
-    voir agent.py) ne fournit pas de nom — on le dérive de l'email en attendant une vraie
-    source d'enrichissement. Website est renseigné à partir de company_domain : c'est le
-    champ sur lequel find_lead_by_domain() s'appuie pour la dédup future.
+    LastName est obligatoire côté Salesforce mais Clay n'envoie pas de nom dans le contrat
+    actuel (voir WebhookPayload dans main.py) — on le dérive de l'email. Website est
+    renseigné à partir de company_domain : c'est le champ sur lequel find_lead_by_domain()
+    s'appuie pour la dédup future.
     """
     sf = get_client()
     local_part = decision_maker_email.split("@")[0] if decision_maker_email else "inconnu"
