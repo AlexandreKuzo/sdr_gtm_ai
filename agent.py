@@ -1,10 +1,12 @@
 """Workflow LangGraph : webhook -> dédup Salesforce -> enrichissement -> scoring ->
 notification Slack (Human-in-the-loop) -> sync Salesforce.
 
-L'enrichissement reste simulé pour l'instant (à brancher sur une vraie API, type
-Apollo/Exa). La dédup/sync Salesforce utilise sf_client.py si SF_CLIENT_ID/SECRET/
-LOGIN_URL sont configurés dans .env, sinon reste en mode simulation. Le scoring et la
-rédaction d'email utilisent judge.py (heuristique, ou LLM si une clé est définie).
+L'enrichissement est fait en amont par Clay, qui pousse les données déjà enrichies sur
+/webhook/lead (voir enrich_lead_node). La dédup/sync Salesforce utilise sf_client.py si
+SF_CLIENT_ID/SECRET/LOGIN_URL sont configurés dans .env, sinon reste en mode simulation.
+Le scoring et la rédaction d'email utilisent judge.py (heuristique, ou LLM si une clé est
+définie). Après validation Slack, un brouillon est créé dans la boîte Gmail du SDR
+(gmail_client.py) : l'agent n'envoie jamais de lui-même.
 """
 import sqlite3
 from typing import Any, Dict, Literal
@@ -15,6 +17,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 import config
+import gmail_client
 import judge
 import sf_client
 import slack_client
@@ -33,10 +36,13 @@ class AgentState(TypedDict):
     # Score ICP et raisonnement
     icp_score: int
     icp_reasoning: str
-    # Message généré
+    # Message généré (objet + corps : le brouillon Gmail a besoin des deux séparément)
+    email_subject: str
     email_draft: str
     # Approbation humaine (Slack)
     human_approved: bool
+    # Résultat de la création du brouillon Gmail (voir gmail_client.create_draft)
+    gmail_draft: Dict[str, Any]
 
 
 # ==========================================
@@ -95,10 +101,11 @@ def score_lead_node(state: AgentState) -> Dict[str, Any]:
 def draft_email_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     """Rédige l'email personnalisé (via judge.py) et notifie Slack pour validation humaine."""
     print("✍️ [Nœud 4] Rédaction de l'email de prospection...")
-    draft = judge.draft_email(
+    subject, draft = judge.draft_email(
         decision_maker_email=state["enriched_data"]["decision_maker_email"],
         decision_maker_role=state["enriched_data"]["decision_maker_role"],
         reasoning=state["icp_reasoning"],
+        company_name=state["webhook_data"].get("company_name"),
     )
 
     thread_id = config["configurable"]["thread_id"]
@@ -110,13 +117,30 @@ def draft_email_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any
         icp_reasoning=state["icp_reasoning"],
     )
 
-    return {"email_draft": draft}
+    return {"email_subject": subject, "email_draft": draft}
+
+
+def create_gmail_draft_node(state: AgentState) -> Dict[str, Any]:
+    """Crée le brouillon dans la boîte du SDR, une fois le contenu approuvé dans Slack.
+
+    N'est atteint que par le chemin approuvé (voir route_after_human_check) : un lead
+    sans contact, mal scoré, doublon ou rejeté ne produit jamais de brouillon. Un échec
+    Gmail n'interrompt pas le graphe — il est remonté dans le state puis loggué dans
+    l'activité Salesforce, pour que le lead ne disparaisse pas silencieusement.
+    """
+    print("📧 [Nœud 5] Création du brouillon Gmail...")
+    result = gmail_client.create_draft(
+        to=state["enriched_data"].get("decision_maker_email"),
+        subject=state.get("email_subject") or "Question rapide",
+        body=state.get("email_draft", ""),
+    )
+    return {"gmail_draft": result}
 
 
 def sync_salesforce_node(state: AgentState) -> Dict[str, Any]:
     """Crée le Lead (s'il est nouveau) et loggue l'activité dans Salesforce."""
     if not sf_client.is_configured():
-        print("☁️ [Nœud 5] Salesforce non configuré (.env) — synchronisation simulée.")
+        print("☁️ [Nœud 6] Salesforce non configuré (.env) — synchronisation simulée.")
         return {}
 
     lead_id = state["sf_status"].get("lead_id")
@@ -128,12 +152,21 @@ def sync_salesforce_node(state: AgentState) -> Dict[str, Any]:
             decision_maker_role=state["enriched_data"].get("decision_maker_role"),
             icp_score=state.get("icp_score", 0),
         )
-        print(f"☁️ [Nœud 5] Lead créé dans Salesforce : {lead_id}")
+        print(f"☁️ [Nœud 6] Lead créé dans Salesforce : {lead_id}")
     else:
-        print(f"☁️ [Nœud 5] Lead existant réutilisé : {lead_id}")
+        print(f"☁️ [Nœud 6] Lead existant réutilisé : {lead_id}")
 
     subject = "Email de prospection généré" if state.get("email_draft") else "Lead loggué (doublon ou score faible)"
     description = state.get("email_draft") or state.get("icp_reasoning", "")
+
+    # Trace du brouillon dans le CRM : sans ça, impossible de savoir depuis Salesforce
+    # si l'email approuvé a bien atterri dans la boîte du SDR.
+    gmail_draft = state.get("gmail_draft") or {}
+    if gmail_draft.get("created"):
+        description += f"\n\nBrouillon Gmail créé : {gmail_draft.get('url') or gmail_draft.get('draft_id')}"
+    elif gmail_draft:
+        description += f"\n\n⚠️ Brouillon Gmail non créé : {gmail_draft.get('reason')}"
+
     sf_client.log_activity(lead_id, subject, description)
 
     return {"sf_status": {**state["sf_status"], "lead_id": lead_id}}
@@ -164,10 +197,10 @@ def route_after_scoring(state: AgentState) -> Literal["draft_email_node", "sync_
     return "draft_email_node"
 
 
-def route_after_human_check(state: AgentState) -> Literal["sync_salesforce_node", "__end__"]:
+def route_after_human_check(state: AgentState) -> Literal["create_gmail_draft_node", "__end__"]:
     """Route selon la validation humaine reçue de Slack."""
     if state["human_approved"]:
-        return "sync_salesforce_node"
+        return "create_gmail_draft_node"
     print("❌ Draft rejeté par l'humain. Fin du process.")
     return END
 
@@ -181,6 +214,7 @@ builder.add_node("deduplicate_salesforce_node", deduplicate_salesforce_node)
 builder.add_node("enrich_lead_node", enrich_lead_node)
 builder.add_node("score_lead_node", score_lead_node)
 builder.add_node("draft_email_node", draft_email_node)
+builder.add_node("create_gmail_draft_node", create_gmail_draft_node)
 builder.add_node("sync_salesforce_node", sync_salesforce_node)
 builder.add_node("human_approval_gate_node", human_approval_gate_node)
 
@@ -197,6 +231,7 @@ builder.add_conditional_edges("score_lead_node", route_after_scoring)
 # que l'interruption ne prenne effet — donc avant que human_approved n'existe dans le state.
 builder.add_edge("draft_email_node", "human_approval_gate_node")
 builder.add_conditional_edges("human_approval_gate_node", route_after_human_check)
+builder.add_edge("create_gmail_draft_node", "sync_salesforce_node")
 
 
 def build_graph(checkpointer):

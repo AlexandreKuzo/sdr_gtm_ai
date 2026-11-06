@@ -108,19 +108,46 @@ def score_lead(company_name: str, company_size: str, decision_maker_role: str) -
     return _llm_score(llm, company_name, company_size, decision_maker_role)
 
 
-def draft_email(decision_maker_email: str, decision_maker_role: str, reasoning: str) -> str:
+def draft_email(
+    decision_maker_email: Optional[str],
+    decision_maker_role: Optional[str],
+    reasoning: str,
+    company_name: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Rédige l'email de prospection et renvoie (objet, corps).
+
+    L'objet est renvoyé séparément parce que le brouillon Gmail en a besoin comme
+    en-tête distinct (voir gmail_client.create_draft) — on ne peut pas se contenter
+    d'un bloc de texte unique comme quand le draft n'était qu'affiché dans Slack.
+    """
     llm = _get_llm()
     if llm is None:
-        return (
+        subject = f"Question rapide — {company_name}" if company_name else "Question rapide"
+        body = (
             "Bonjour,\n\n"
             f"En tant que {decision_maker_role}, je pense que notre solution pourrait vous "
             f"intéresser : {reasoning}.\n\n"
             "Auriez-vous 15 minutes cette semaine pour en discuter ?\n\n"
             "Cordialement"
         )
+        return subject, body
 
+    from pydantic import BaseModel, Field
+
+    class EmailDraftSchema(BaseModel):
+        subject: str = Field(description="Objet de l'email, court et non générique (max 60 caractères).")
+        body: str = Field(description="Corps de l'email en texte brut, 120 mots maximum, sans objet répété.")
+
+    structured_llm = llm.with_structured_output(EmailDraftSchema)
     prompt = (
-        f"Rédige un email court et ultra-personnalisé à {decision_maker_email}. "
-        f"Raison : {reasoning}"
+        "Rédige un email de prospection court et personnalisé, en français, pour notre "
+        "logiciel B2B destiné aux équipes Sales.\n"
+        f"Destinataire : {decision_maker_email or 'inconnu'}\n"
+        f"Poste : {decision_maker_role or 'inconnu'}\n"
+        f"Société : {company_name or 'inconnue'}\n"
+        f"Pourquoi ce prospect est pertinent : {reasoning}\n\n"
+        "Contraintes : pas de flatterie creuse, une seule demande claire (15 minutes "
+        "d'échange), ton direct, aucune promesse chiffrée inventée."
     )
-    return llm.invoke(prompt).content
+    result = structured_llm.invoke(prompt)
+    return result.subject, result.body

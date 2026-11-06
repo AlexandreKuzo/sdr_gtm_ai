@@ -89,12 +89,31 @@ def update_message(response_url: str, text: str) -> None:
         print(f"[SLACK:ERREUR] Échec de la mise à jour du message : {exc}")
 
 
-def confirm_decision(response_url: str, approved: bool, company_name: str, sf_lead_id: Optional[str] = None) -> None:
-    """Affiche le résultat de la décision humaine à la place des boutons Approve/Reject."""
+def confirm_decision(
+    response_url: str,
+    approved: bool,
+    company_name: str,
+    sf_lead_id: Optional[str] = None,
+    gmail_draft: Optional[dict] = None,
+) -> None:
+    """Affiche le résultat de la décision humaine à la place des boutons Approve/Reject.
+
+    Inclut le lien direct vers le brouillon Gmail quand il a été créé : le SDR passe de
+    l'approbation à l'envoi en un clic, sans aller chercher le brouillon dans sa boîte.
+    """
     if approved:
         text = f"✅ *Approuvé* — {company_name}"
         if sf_lead_id:
             text += f"\nLead créé dans Salesforce (`{sf_lead_id}`)."
+        draft = gmail_draft or {}
+        if draft.get("created") and draft.get("url"):
+            text += f"\n📧 <{draft['url']}|Relire et envoyer le brouillon Gmail> (à {draft.get('to')})"
+        elif draft.get("created"):
+            text += "\n📧 Brouillon Gmail créé dans ta boîte."
+        elif draft.get("simulated"):
+            text += "\n📧 _Gmail non configuré : brouillon simulé._"
+        elif draft:
+            text += f"\n⚠️ Brouillon Gmail non créé : {draft.get('reason')}"
     else:
-        text = f"❌ *Rejeté* — {company_name}. Aucune action Salesforce."
+        text = f"❌ *Rejeté* — {company_name}. Aucun brouillon créé, aucune action Salesforce."
     update_message(response_url, text)
